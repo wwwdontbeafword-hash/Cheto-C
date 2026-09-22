@@ -67,14 +67,40 @@ background:#260a14;color:#ff718a;font-size:12px;text-align:center;animation:shak
 """
 
 HOME_HTML = r"""
-<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Cheto</title><style>
-body{margin:0;min-height:100vh;background:#03050b;color:white;font-family:Arial,sans-serif;
-display:grid;place-items:center}.box{text-align:center;padding:35px;border:1px solid #222b3d;
-border-radius:18px;background:#080c14;box-shadow:0 0 55px #7954ff18}
-h1{margin:0 0 8px}.box p{color:#8791a5}.box a{color:#9e87ff}
-</style></head><body><div class="box"><h1>Access Granted</h1>
-<p>The second website is ready for your next page.</p><a href="/logout">Logout</a></div></body></html>
+<!doctype html>
+<html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cheto Control</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#050811;color:#e9eefb;font-family:Arial,sans-serif;min-height:100vh}
+.top{height:62px;position:sticky;top:0;z-index:5;background:#090e19dd;backdrop-filter:blur(14px);border-bottom:1px solid #202a3c;display:flex;align-items:center;padding:0 18px;gap:14px}
+.menu{font-size:26px;color:#63b8ff}.brand{font-size:17px;font-weight:800;letter-spacing:.6px}.wrap{width:min(820px,94vw);margin:28px auto 70px}
+.hero,.section{background:linear-gradient(145deg,#0c1320,#080d17);border:1px solid #202c40;border-radius:18px;padding:22px;margin-bottom:16px;box-shadow:0 18px 55px #0005}
+h1{font-size:29px;margin:0 0 7px}.muted{color:#8592a8;margin:0;font-size:14px}.section h2{font-size:20px;margin:0 0 5px}.section p{color:#8491a6;margin:0 0 18px;font-size:13px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:15px;padding:13px 0;border-top:1px solid #172235}.row:first-of-type{border-top:0}.label{font-size:15px}.switch{position:relative;width:48px;height:27px;flex:0 0 auto}.switch input{display:none}.slider{position:absolute;inset:0;background:#293448;border-radius:99px;cursor:pointer;transition:.2s}.slider:before{content:"";position:absolute;width:21px;height:21px;left:3px;top:3px;border-radius:50%;background:#dfe8f5;transition:.2s}.switch input:checked+.slider{background:#2699e8;box-shadow:0 0 18px #2699e833}.switch input:checked+.slider:before{transform:translateX(21px);background:#fff}
+.btn{border:0;border-radius:10px;padding:12px 16px;background:#168edb;color:white;font-weight:700;font-size:14px;cursor:pointer}.btn:active{transform:scale(.98)}select{background:#0b1220;color:#e8eef9;border:1px solid #2a3850;border-radius:10px;padding:11px 38px 11px 12px;font-size:14px}.inline{display:flex;align-items:center;justify-content:space-between;gap:12px}.theme{margin-top:8px}.logout{display:block;text-align:center;color:#718097;text-decoration:none;font-size:12px;margin-top:22px}@media(max-width:560px){.wrap{margin-top:16px}.hero,.section{padding:18px}h1{font-size:25px}.row{padding:12px 0}}
+</style></head><body>
+<div class="top"><div class="menu">☰</div><div class="brand">Cheto Control</div></div>
+<div class="wrap">
+ <div class="hero"><h1>Overview</h1><p class="muted">Quickly enable or disable important features.</p></div>
+ <div class="section" id="overview">
+  <div class="row"><span class="label">Aim assist</span><label class="switch"><input type="checkbox"><span class="slider"></span></label></div>
+  <div class="row"><span class="label">No scope aimbot</span><label class="switch"><input type="checkbox"><span class="slider"></span></label></div>
+  <div class="row"><span class="label">Enemy ESP</span><label class="switch"><input type="checkbox"><span class="slider"></span></label></div>
+  <div class="row"><span class="label">Item ESP</span><label class="switch"><input type="checkbox"><span class="slider"></span></label></div>
+  <div class="row"><span class="label">Vehicle ESP</span><label class="switch"><input type="checkbox"><span class="slider"></span></label></div>
+  <div class="row"><span class="label">Tomb Box ESP</span><label class="switch"><input type="checkbox"><span class="slider"></span></label></div>
+  <div class="row"><span class="label">Grenade ESP</span><label class="switch"><input type="checkbox"><span class="slider"></span></label></div>
+  <div class="row"><span class="label">Airdrop ESP</span><label class="switch"><input type="checkbox"><span class="slider"></span></label></div>
+  <div class="row"><span class="label">Bunny Hop</span><label class="switch"><input type="checkbox"><span class="slider"></span></label></div>
+ </div>
+ <div class="section"><h2>Open menu corner</h2><p>Choose where the control menu opens.</p><select><option>Top Left</option><option>Top Right</option><option>Bottom Left</option><option>Bottom Right</option></select></div>
+ <div class="section"><h2>Aimbot profiles</h2><p>Manage your aimbot profiles.</p><button class="btn">New aimbot settings profile</button></div>
+ <div class="section"><h2>Item profiles</h2><p>Manage your item profiles.</p><button class="btn">New item settings profile</button></div>
+ <div class="section"><h2>Reset settings</h2><p>Restore the default configuration.</p><button class="btn">Load default settings</button></div>
+ <div class="section"><h2>Language</h2><select><option>English</option><option>العربية</option></select></div>
+ <div class="section"><h2>Theme</h2><div class="inline theme"><span class="muted">Midnight theme</span><label class="switch"><input type="checkbox" checked><span class="slider"></span></label></div></div>
+ <a class="logout" href="/logout">Logout</a>
+</div></body></html>
 """
 
 def verify_key(key):
