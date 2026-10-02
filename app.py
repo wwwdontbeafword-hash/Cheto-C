@@ -1,133 +1,276 @@
-from flask import Flask, request, render_template_string, redirect, session
-import os, secrets, urllib.request, urllib.error, json
+from flask import Flask, request, jsonify, redirect, session, render_template_string
+import os, sqlite3, hashlib, json, urllib.request, urllib.error
+from datetime import datetime
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:
+    psycopg = None
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
+app.secret_key = os.environ.get("SECRET_KEY", "change-this-secret-key")
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("COOKIE_SECURE", "1") == "1",
+)
 
-# Put the FIRST website URL in Render Environment Variables:
-# KEY_MANAGER_URL=https://your-key-manager.onrender.com
-KEY_MANAGER_URL = os.environ.get("KEY_MANAGER_URL", "").rstrip("/")
+# Existing key-manager site. This settings site does NOT create keys; it only
+# checks that the key exists/is active, then stores preferences for that key.
+KEY_VERIFY_URL = os.environ.get(
+    "KEY_VERIFY_URL",
+    "https://key-manager-o3df.onrender.com/verify",
+).strip()
 
-LOGIN_HTML = r"""
-<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cheto Access</title><style>
-*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:Arial,sans-serif;color:#e9eefb;background:radial-gradient(circle at 50% 0,#0b1a2c 0,#050811 42%,#03060c 100%);padding:22px}.card{width:min(430px,94vw);background:linear-gradient(145deg,#0c1320,#080d17);border:1px solid #202c40;border-radius:24px;padding:32px 24px 26px;box-shadow:0 24px 70px #000a,0 0 0 1px #ffffff05;animation:rise .55s cubic-bezier(.2,.8,.2,1)}@keyframes rise{from{opacity:0;transform:translateY(18px) scale(.98)}to{opacity:1;transform:none}}.logo{width:156px;height:64px;object-fit:contain;display:block;margin:0 auto 14px;filter:drop-shadow(0 10px 25px #0008)}h1{text-align:center;margin:6px 0 7px;font-size:28px}.sub{text-align:center;color:#8491a6;font-size:13px;margin-bottom:23px}.error{padding:11px;border-radius:11px;background:#2a0e18;border:1px solid #6a283b;color:#ff8297;font-size:12px;margin-bottom:13px;text-align:center}input{width:100%;padding:15px;background:#080e18;border:1px solid #2a3850;border-radius:12px;color:#fff;outline:none;font-size:14px;transition:.2s}input:focus{border-color:#2699e8;box-shadow:0 0 0 4px #2699e817}button{width:100%;margin-top:13px;padding:14px;border:0;border-radius:12px;background:linear-gradient(135deg,#168edb,#2aa8f2);color:#fff;font-size:14px;font-weight:800;box-shadow:0 12px 28px #168edb2b}.foot{text-align:center;color:#56647a;font-size:10px;margin-top:18px;letter-spacing:1.4px}
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+SQLITE_PATH = os.environ.get("SQLITE_PATH", "cheto_settings.db")
+ALLOWED_LANGUAGES = {"en", "es", "ar"}
 
-/* global control-server notice */
-.systemLayer{position:fixed;inset:0;z-index:999;background:radial-gradient(circle at 50% 30%,#14080d 0,#03050aeF 52%,#000 100%);backdrop-filter:blur(20px);display:grid;place-items:center;padding:22px;opacity:0;pointer-events:none;transition:.35s}.systemLayer.show{opacity:1;pointer-events:auto}.systemCard{position:relative;overflow:hidden;width:min(520px,94vw);background:linear-gradient(145deg,#0d1421,#060910);border:1px solid #34445d;border-radius:28px;padding:34px 27px;text-align:center;box-shadow:0 34px 120px #000,0 0 80px #ff38552a}.systemCard:before{content:"";position:absolute;inset:-1px;background:linear-gradient(110deg,transparent 20%,#ffffff08 48%,transparent 72%);transform:translateX(-120%);animation:scan 4s linear infinite;pointer-events:none}@keyframes scan{to{transform:translateX(120%)}}.sysIcon{width:74px;height:74px;margin:0 auto 19px;border-radius:23px;display:grid;place-items:center;background:#2a0c15;border:1px solid #743047;color:#fff;font-size:35px;box-shadow:0 0 34px #ff36543a}.systemCard h3{font-size:27px;margin:0 0 12px;color:#ff748a}.systemCard p{white-space:pre-line;color:#9aa8bb;line-height:1.7;margin:0;font-size:14px}.statusline{margin-top:22px;color:#78869a;font-size:11px;letter-spacing:2px;text-transform:uppercase}.pulse{width:10px;height:10px;border-radius:50%;background:#ff4967;display:inline-block;margin-right:9px;box-shadow:0 0 0 0 #ff496777;animation:pulse 1.35s infinite}@keyframes pulse{70%{box-shadow:0 0 0 14px #ff496700}}.updateLayer .systemCard{box-shadow:0 34px 120px #000,0 0 70px #2699e824}.updateLayer .sysIcon{background:#0d2236;border-color:#285d86;color:#7cc7ff;box-shadow:0 0 34px #2699e830}.updateLayer .systemCard h3{color:#7cc7ff}
-</style></head><body><div class="card"><img class="logo" src="/static/cheto.png" onerror="this.style.display='none'"><h1>Cheto Control</h1><div class="sub">Enter your activation key to access settings.</div>{% if error %}<div class="error">{{error}}</div>{% endif %}<form method="POST"><input name="key" placeholder="Activation Key" autocomplete="off" required><button>Continue</button></form><div class="foot">MIDNIGHT CONTROL PANEL</div></div>
-<div class="systemLayer updateLayer" id="loginUpdateLayer"><div class="systemCard"><div class="sysIcon">✦</div><h3 id="loginUpdateTitle">System Update</h3><p id="loginUpdateMessage"></p><div class="statusline"><span class="pulse"></span>Priority notice</div></div></div>
-<div class="systemLayer" id="loginOfflineLayer"><div class="systemCard"><div class="sysIcon">!</div><h3>Connection suspended</h3><p>Control access has been suspended by the server.
-This screen will remain locked until service is restored.</p><div class="statusline"><span class="pulse"></span>Waiting for server</div></div></div>
-<script>async function syncPublicServer(){try{const r=await fetch('/api/public-server-status',{cache:'no-store'}),d=await r.json();const off=(d.enabled===false)||(d.server_enabled===false);document.getElementById('loginOfflineLayer').classList.toggle('show',off);if(off){document.getElementById('loginUpdateLayer').classList.remove('show');return}const active=!!d.update_active;document.getElementById('loginUpdateTitle').textContent=d.title||'System Update';document.getElementById('loginUpdateMessage').textContent=d.message||'';document.getElementById('loginUpdateLayer').classList.toggle('show',active)}catch(e){}}syncPublicServer();setInterval(syncPublicServer,4000);</script></body></html>
-"""
 
-HOME_HTML = r"""
-<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cheto Control</title><style>
-*{box-sizing:border-box}body{margin:0;background:#050811;color:#e9eefb;font-family:Arial,sans-serif;min-height:100vh}.top{height:62px;position:sticky;top:0;z-index:20;background:#090e19ee;backdrop-filter:blur(14px);border-bottom:1px solid #202a3c;display:flex;align-items:center;padding:0 20px;gap:15px}.menu{font-size:29px;color:#63b8ff;cursor:pointer;line-height:1}.brand{font-size:18px;font-weight:800}.wrap{width:min(820px,94vw);margin:22px auto 70px}.hero,.section{background:linear-gradient(145deg,#0c1320,#080d17);border:1px solid #202c40;border-radius:18px;padding:22px;margin-bottom:16px;box-shadow:0 18px 55px #0005}h1{font-size:29px;margin:0 0 7px}.muted,.section p{color:#8491a6}.section h2{font-size:20px;margin:0 0 5px}.section p{margin:0 0 18px;font-size:13px}.row{display:flex;align-items:center;justify-content:space-between;gap:15px;padding:13px 0;border-top:1px solid #172235}.row:first-of-type{border-top:0}.label{font-size:15px}.switch{position:relative;width:48px;height:27px;flex:0 0 auto}.switch input{display:none}.slider{position:absolute;inset:0;background:#293448;border-radius:99px;cursor:pointer;transition:.25s}.slider:before{content:"";position:absolute;width:21px;height:21px;left:3px;top:3px;border-radius:50%;background:#dfe8f5;transition:.25s}.switch input:checked+.slider{background:#2699e8}.switch input:checked+.slider:before{transform:translateX(21px);background:#fff}.btn{border:0;border-radius:10px;padding:12px 16px;background:#168edb;color:white;font-weight:700;font-size:14px}.selectBtn{display:flex;align-items:center;justify-content:space-between;width:min(240px,100%);padding:13px 15px;background:#0b1220;color:#e8eef9;border:1px solid #2a3850;border-radius:11px;font-size:14px;cursor:pointer}.chev{color:#63b8ff}.inline{display:flex;align-items:center;justify-content:space-between;gap:12px}.logout{display:block;text-align:center;color:#718097;text-decoration:none;font-size:12px;margin-top:22px}
-/* custom site modal */.modal{position:fixed;inset:0;z-index:60;background:#0008;backdrop-filter:blur(5px);display:flex;align-items:flex-end;justify-content:center;opacity:0;pointer-events:none;transition:.25s}.modal.show{opacity:1;pointer-events:auto}.sheet{width:min(560px,100%);background:#0b111c;border:1px solid #26344a;border-radius:22px 22px 0 0;padding:10px 14px 22px;transform:translateY(100%);transition:.3s cubic-bezier(.2,.8,.2,1)}.modal.show .sheet{transform:translateY(0)}.grab{width:42px;height:4px;border-radius:9px;background:#34435a;margin:2px auto 10px}.opt{display:flex;align-items:center;justify-content:space-between;padding:17px 12px;border-bottom:1px solid #1c2839;font-size:16px;cursor:pointer}.opt:last-child{border-bottom:0}.radio{width:21px;height:21px;border:2px solid #71819a;border-radius:50%}.opt.active .radio{border:6px solid #2699e8}
-/* drawer */.shade{position:fixed;inset:0;background:#0009;z-index:39;opacity:0;pointer-events:none;transition:.25s}.shade.show{opacity:1;pointer-events:auto}.drawer{position:fixed;z-index:40;left:0;top:0;bottom:0;width:min(76vw,300px);background:#080e18;border-right:1px solid #243249;transform:translateX(-102%);transition:.3s cubic-bezier(.2,.8,.2,1);padding:26px 18px}.drawer.show{transform:none}.profile{text-align:center;padding:14px 6px 20px;border-bottom:1px solid #1c2839}.pic{width:78px;height:78px;margin:auto;border-radius:50%;display:grid;place-items:center;overflow:hidden;background:linear-gradient(145deg,#132238,#0b1422);border:1px solid #2e4564;box-shadow:0 0 28px #168edb22}.pic img{width:100%;height:100%;object-fit:cover}.pname{font-weight:800;margin-top:10px}.keybox{margin-top:13px;display:flex;align-items:center;gap:8px;background:#050a12;border:1px solid #202e43;border-radius:10px;padding:10px}.keytxt{font-family:monospace;font-size:11px;color:#9ba9bc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}.eye{border:0;background:none;color:#63b8ff;font-size:18px;padding:0;cursor:pointer}.nav{margin-top:18px}.navitem{display:flex;align-items:center;gap:11px;padding:13px;border-radius:11px;background:#101a29;border:1px solid #24354e;color:#eaf1fb;font-weight:700}.navicon{color:#63b8ff}
-.systemLayer{position:fixed;inset:0;z-index:100;background:radial-gradient(circle at 50% 30%,#14080d 0,#02050aef 55%,#000 100%);backdrop-filter:blur(18px);display:grid;place-items:center;padding:24px;opacity:0;pointer-events:none;transition:.3s}.systemLayer.show{opacity:1;pointer-events:auto}.systemCard{width:min(430px,94vw);background:linear-gradient(145deg,#101a2a,#080d17);border:1px solid #2a3b55;border-radius:24px;padding:28px;text-align:center;box-shadow:0 30px 110px #000,0 0 70px #ff385526;transform:scale(.94) translateY(10px);transition:.35s}.systemLayer.show .systemCard{transform:none}.sysIcon{width:64px;height:64px;margin:0 auto 16px;border-radius:20px;display:grid;place-items:center;background:#10243a;border:1px solid #275077;font-size:28px}.systemCard h3{font-size:23px;margin:0 0 10px}.systemCard p{white-space:pre-line;color:#9aa8bb;line-height:1.65;margin:0}.offline .sysIcon{background:#28121a;border-color:#633041}.offline h3{color:#ff748a;text-shadow:0 0 22px #ff496744}.pulse{width:8px;height:8px;border-radius:50%;background:#ff5f78;display:inline-block;margin-right:7px;box-shadow:0 0 0 0 #ff5f7866;animation:pulse 1.5s infinite}@keyframes pulse{70%{box-shadow:0 0 0 12px #ff5f7800}}.statusline{margin-top:18px;color:#64738a;font-size:11px;letter-spacing:1px;text-transform:uppercase}@media(max-width:560px){.wrap{margin-top:16px}.hero,.section{padding:18px}h1{font-size:25px}}
-</style></head><body>
-<div class="top"><div class="menu" onclick="drawer(true)">☰</div><div class="brand">Cheto Control</div></div>
-<div class="shade" id="shade" onclick="drawer(false)"></div><aside class="drawer" id="drawer"><div class="profile"><div class="pic"><img src="/static/cheto.png" onerror="this.parentElement.innerHTML='C'"></div><div class="pname">Cheto Account</div><div class="keybox"><span class="keytxt" id="keytxt">••••••••••••••••</span><button class="eye" onclick="toggleKey()" id="eye">◉</button></div></div><div class="nav"><div class="navitem"><span class="navicon">⚙</span>Settings</div></div></aside>
-<div class="wrap"><div class="hero"><h1>Overview</h1><p class="muted">Quickly enable or disable important features.</p></div><div class="section">
-{% for x in ['Aim assist','No scope aimbot','Enemy ESP','Item ESP','Vehicle ESP','Tomb Box ESP','Grenade ESP','Airdrop ESP','Bunny Hop'] %}<div class="row"><span class="label">{{x}}</span><label class="switch"><input type="checkbox"><span class="slider"></span></label></div>{% endfor %}</div>
-<div class="section"><h2>Open menu corner</h2><p>Choose where the control menu opens.</p><button class="selectBtn" onclick="openPick('corner')"><span id="cornerText">Top Left</span><span class="chev">⌄</span></button></div>
-<div class="section"><h2>Aimbot profiles</h2><p>Manage your aimbot profiles.</p><button class="btn">New aimbot settings profile</button></div><div class="section"><h2>Item profiles</h2><p>Manage your item profiles.</p><button class="btn">New item settings profile</button></div><div class="section"><h2>Reset settings</h2><p>Restore the default configuration.</p><button class="btn">Load default settings</button></div>
-<div class="section"><h2>Language</h2><button class="selectBtn" onclick="openPick('lang')"><span id="langText">English</span><span class="chev">⌄</span></button></div><div class="section"><h2>Theme</h2><div class="inline"><span class="muted">Midnight theme</span><label class="switch"><input type="checkbox" checked><span class="slider"></span></label></div></div><a class="logout" href="/logout">Logout</a></div>
-<div class="modal" id="modal" onclick="if(event.target===this)closePick()"><div class="sheet"><div class="grab"></div><div id="options"></div></div></div>
-<div class="systemLayer" id="updateLayer"><div class="systemCard"><div class="sysIcon">✦</div><h3 id="updateTitle">System Update</h3><p id="updateMessage"></p><div class="statusline">Cheto Control • Live notice</div></div></div>
-<div class="systemLayer offline" id="offlineLayer"><div class="systemCard"><div class="sysIcon">!</div><h3>Connection suspended</h3><p>The control server is temporarily unavailable.
-Your session is safe — access will return automatically when the server is online.</p><div class="statusline"><span class="pulse"></span>Waiting for server</div></div></div>
-<script>
-const KEY={{ access_key|tojson }};let showing=false,current='';const data={lang:['English','العربية'],corner:['Top Left','Top Right','Bottom Left','Bottom Right']};
-function drawer(v){document.getElementById('drawer').classList.toggle('show',v);document.getElementById('shade').classList.toggle('show',v)}
-function toggleKey(){showing=!showing;document.getElementById('keytxt').textContent=showing?KEY:'••••••••••••••••';document.getElementById('eye').textContent=showing?'◉':'◎'}
-function openPick(type){current=type;let selected=document.getElementById(type+'Text').textContent;document.getElementById('options').innerHTML=data[type].map(v=>`<div class="opt ${v===selected?'active':''}" onclick="choose('${v.replace(/'/g,"\'")}')"><span>${v}</span><span class="radio"></span></div>`).join('');document.getElementById('modal').classList.add('show')}
-function choose(v){document.getElementById(current+'Text').textContent=v;closePick()}
-function closePick(){document.getElementById('modal').classList.remove('show')}
-let lastNotice='';
-async function syncServer(){try{const r=await fetch('/api/server-status',{cache:'no-store'}),d=await r.json();const off=(d.enabled===false)||(d.server_enabled===false);document.getElementById('offlineLayer').classList.toggle('show',off);if(off)return;const active=!!d.update_active;const title=d.title||'System Update';const msg=d.message||'';const sig=title+'|'+msg+'|'+active;if(active){document.getElementById('updateTitle').textContent=title;document.getElementById('updateMessage').textContent=msg;document.getElementById('updateLayer').classList.add('show');lastNotice=sig}else{document.getElementById('updateLayer').classList.remove('show')}}catch(e){}}
-syncServer();setInterval(syncServer,4000);
-</script></body></html>
-"""
+class DBConnection:
+    def __init__(self, con, postgres=False):
+        self._con = con
+        self.postgres = postgres
 
-def verify_key(key):
-    if not KEY_MANAGER_URL:
-        return False, "Server connection is not configured."
-    payload = json.dumps({"key": key}).encode()
+    def execute(self, sql, params=()):
+        if self.postgres:
+            cur = self._con.cursor()
+            cur.execute(sql.replace("?", "%s"), params)
+            return cur
+        return self._con.execute(sql, params)
+
+    def commit(self):
+        return self._con.commit()
+
+    def close(self):
+        return self._con.close()
+
+
+def db():
+    if DATABASE_URL:
+        if psycopg is None:
+            raise RuntimeError("Install psycopg[binary] when using DATABASE_URL")
+        con = DBConnection(psycopg.connect(DATABASE_URL, row_factory=dict_row), True)
+    else:
+        raw = sqlite3.connect(SQLITE_PATH)
+        raw.row_factory = sqlite3.Row
+        con = DBConnection(raw, False)
+
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS key_settings(
+            key_hash TEXT PRIMARY KEY,
+            language TEXT NOT NULL DEFAULT 'en',
+            updated TEXT NOT NULL
+        )"""
+    )
+    con.commit()
+    return con
+
+
+def normalize_key(value):
+    return str(value or "").strip().upper()
+
+
+def key_hash(key):
+    return hashlib.sha256(normalize_key(key).encode("utf-8")).hexdigest()
+
+
+def mask_key(key):
+    key = normalize_key(key)
+    if len(key) <= 6:
+        return key[:1] + "••••" + key[-1:]
+    return key[:3] + "••••••" + key[-3:]
+
+
+def verify_key_remote(key):
+    """Validate against the existing key-manager without binding a new device."""
+    payload = json.dumps({"key": normalize_key(key)}).encode("utf-8")
     req = urllib.request.Request(
-        KEY_MANAGER_URL + "/verify",
+        KEY_VERIFY_URL,
         data=payload,
-        headers={"Content-Type":"application/json"},
-        method="POST"
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "Cheto-Settings/1.0",
+        },
+        method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            data = json.loads(r.read().decode())
-        if data.get("valid"):
-            return True, ""
-        reasons = {
-            "invalid_key":"Invalid activation key.",
-            "inactive":"This key is stopped or expired.",
-            "device_limit":"Device limit reached.",
-            "server_offline":"The server is currently offline."
-        }
-        return False, reasons.get(data.get("reason"), "Access denied.")
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            body = resp.read().decode("utf-8", "replace")
+            data = json.loads(body or "{}")
+            return bool(data.get("valid")), str(data.get("reason", ""))
+    except urllib.error.HTTPError as exc:
+        try:
+            data = json.loads(exc.read().decode("utf-8", "replace") or "{}")
+            return bool(data.get("valid")), str(data.get("reason", "http_error"))
+        except Exception:
+            return False, "http_error"
     except Exception:
-        return False, "Could not connect to Key Manager."
+        return False, "connection_error"
 
-@app.route("/", methods=["GET","POST"])
+
+def get_settings_by_hash(kh):
+    con = db()
+    row = con.execute(
+        "SELECT language, updated FROM key_settings WHERE key_hash=?",
+        (kh,),
+    ).fetchone()
+    con.close()
+    if not row:
+        return {"language": "en", "updated": ""}
+    return {"language": row["language"], "updated": row["updated"]}
+
+
+def save_settings_by_hash(kh, language):
+    language = language if language in ALLOWED_LANGUAGES else "en"
+    now = datetime.utcnow().isoformat()
+    con = db()
+    if con.postgres:
+        con.execute(
+            """INSERT INTO key_settings(key_hash,language,updated)
+               VALUES(?,?,?)
+               ON CONFLICT(key_hash) DO UPDATE SET language=EXCLUDED.language, updated=EXCLUDED.updated""",
+            (kh, language, now),
+        )
+    else:
+        con.execute(
+            """INSERT INTO key_settings(key_hash,language,updated)
+               VALUES(?,?,?)
+               ON CONFLICT(key_hash) DO UPDATE SET language=excluded.language, updated=excluded.updated""",
+            (kh, language, now),
+        )
+    con.commit()
+    con.close()
+    return now
+
+
+LOGIN_HTML = r"""
+<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cheto Settings</title>
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#03050a;color:#f7f8fc;font-family:Arial,sans-serif;background-image:radial-gradient(circle at 20% 10%,#5f3dff22,transparent 30%),radial-gradient(circle at 85% 85%,#1a8bff17,transparent 30%)}
+.card{width:min(480px,92vw);padding:30px;border:1px solid #20283a;border-radius:24px;background:#080b12eF;box-shadow:0 26px 80px #000b,0 0 60px #684dff14;backdrop-filter:blur(18px)}
+.badge{display:inline-flex;gap:7px;align-items:center;padding:7px 10px;border:1px solid #27513f;border-radius:999px;color:#64e9a8;background:#071a13;font-size:10px;font-weight:900}.dot{width:6px;height:6px;border-radius:50%;background:#59eaa2;box-shadow:0 0 12px #59eaa2}
+h1{font-size:31px;margin:18px 0 8px}.sub{color:#7e899e;font-size:13px;line-height:1.6;margin:0 0 20px}.err{padding:11px 12px;margin-bottom:12px;border:1px solid #642033;border-radius:12px;background:#280b13;color:#ff8194;font-size:12px}
+input,button{width:100%;height:54px;border-radius:14px;font-size:14px}input{border:1px solid #293248;background:#04070d;color:#fff;padding:0 16px;outline:none}input:focus{border-color:#735cff;box-shadow:0 0 0 4px #735cff16}button{margin-top:12px;border:0;color:white;font-weight:900;cursor:pointer;background:linear-gradient(90deg,#5f46ff,#a83bf3,#3282ff);box-shadow:0 12px 30px #6a4cff30}.foot{margin-top:15px;color:#58657b;font-size:10px}
+</style></head><body><main class="card"><span class="badge"><i class="dot"></i>KEY SETTINGS ONLINE</span><h1>Settings Browser</h1><p class="sub">Enter the same activation key you used inside Lua. Your settings are stored only for that key.</p>{% if error %}<div class="err">{{error}}</div>{% endif %}<form method="post"><input name="key" placeholder="Activation Key" autocomplete="off" required autofocus><button>CONTINUE</button></form><div class="foot">Cheto-C • Per-key settings</div></main></body></html>
+"""
+
+
+HOME_HTML = r"""
+<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cheto Settings</title>
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#03050a;color:#f7f8fc;font-family:Arial,sans-serif;background-image:radial-gradient(circle at 12% 5%,#6546ff22,transparent 28%),radial-gradient(circle at 90% 90%,#168cff18,transparent 28%)}
+.wrap{width:min(760px,94vw);margin:45px auto}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}.eyebrow{color:#7d879b;font-size:10px;letter-spacing:2px}.title{font-size:28px;font-weight:900;margin-top:5px}.key{font:800 11px monospace;color:#b5bfd2;border:1px solid #273149;background:#070b13;border-radius:999px;padding:8px 11px}
+.card{border:1px solid #20283a;border-radius:24px;background:#080b12ed;box-shadow:0 28px 90px #0009;overflow:hidden}.head{padding:24px 25px;border-bottom:1px solid #182132}.head h2{margin:0 0 6px}.head p{margin:0;color:#78859b;font-size:12px}.body{padding:25px}
+.langs{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.choice{position:relative}.choice input{position:absolute;opacity:0}.choice label{display:block;padding:18px;border:1px solid #283249;border-radius:15px;background:#060a11;cursor:pointer;transition:.2s}.choice label b{display:block;font-size:15px}.choice label span{display:block;color:#79869d;font-size:10px;margin-top:5px}.choice input:checked+label{border-color:#765cff;background:#171333;box-shadow:0 0 25px #765cff23;transform:translateY(-2px)}
+.save{width:100%;height:55px;margin-top:18px;border:0;border-radius:14px;color:white;font-weight:900;cursor:pointer;background:linear-gradient(90deg,#603fff,#a638f1,#347fff)}.ok{margin-bottom:15px;padding:11px 12px;border:1px solid #1d5d42;border-radius:12px;background:#071d15;color:#66edab;font-size:12px}.note{margin-top:15px;color:#6e7b90;font-size:11px;line-height:1.55}.logout{color:#8e99ad;text-decoration:none;font-size:12px}@media(max-width:600px){.langs{grid-template-columns:1fr}.wrap{margin:24px auto}}
+</style></head><body><div class="wrap"><div class="top"><div><div class="eyebrow">CHETO // REMOTE SETTINGS</div><div class="title">Settings Browser</div></div><div><span class="key">{{mask}}</span> &nbsp; <a class="logout" href="/logout">Logout</a></div></div><main class="card"><section class="head"><h2>Language</h2><p>Choose a language, press Save, then return to the game and press “Download settings”.</p></section><section class="body">{% if saved %}<div class="ok">✓ Settings saved for this key.</div>{% endif %}<form method="post"><div class="langs"><div class="choice"><input id="en" type="radio" name="language" value="en" {% if language=='en' %}checked{% endif %}><label for="en"><b>English</b><span>Default interface language</span></label></div><div class="choice"><input id="es" type="radio" name="language" value="es" {% if language=='es' %}checked{% endif %}><label for="es"><b>Español</b><span>Spanish interface</span></label></div><div class="choice"><input id="ar" type="radio" name="language" value="ar" {% if language=='ar' %}checked{% endif %}><label for="ar"><b>العربية</b><span>Arabic interface</span></label></div></div><button class="save">SAVE SETTINGS</button></form><div class="note">Saving here does not immediately change Lua. The change is applied only when you press <b>Download settings</b> inside the menu.</div></section></main></div></body></html>
+"""
+
+
+def login_error(reason):
+    reason = str(reason or "")
+    if reason in {"inactive", "expired", "disabled"}:
+        return "Key expired or stopped."
+    if reason == "server_offline":
+        return "Key server is currently off."
+    if reason == "rate_limited":
+        return "Too many attempts. Try again shortly."
+    if reason == "connection_error":
+        return "Could not reach the key server."
+    return "Invalid activation key."
+
+
+@app.route("/", methods=["GET", "POST"])
 def login():
-    if session.get("access"):
-        return redirect("/home")
     error = None
     if request.method == "POST":
-        key = request.form.get("key","").strip()
-        valid, error = verify_key(key)
-        if valid:
-            session["access"] = True
-            session["key"] = key
-            return redirect("/home")
+        key = normalize_key(request.form.get("key", ""))
+        if not key:
+            error = "Enter your activation key."
+        else:
+            valid, reason = verify_key_remote(key)
+            if valid:
+                session.clear()
+                session["key_hash"] = key_hash(key)
+                session["key_mask"] = mask_key(key)
+                return redirect("/home")
+            error = login_error(reason)
     return render_template_string(LOGIN_HTML, error=error)
 
-@app.route("/home")
+
+@app.route("/home", methods=["GET", "POST"])
 def home():
-    if not session.get("access"):
+    kh = session.get("key_hash")
+    if not kh:
         return redirect("/")
-    # Re-check the key whenever this page is opened.
-    valid, _ = verify_key(session.get("key",""))
+
+    saved = False
+    if request.method == "POST":
+        language = str(request.form.get("language", "en")).lower()
+        if language not in ALLOWED_LANGUAGES:
+            language = "en"
+        save_settings_by_hash(kh, language)
+        saved = True
+
+    settings = get_settings_by_hash(kh)
+    return render_template_string(
+        HOME_HTML,
+        language=settings["language"],
+        mask=session.get("key_mask", "KEY"),
+        saved=saved,
+    )
+
+
+@app.route("/api/settings", methods=["POST"])
+def api_settings():
+    data = request.get_json(silent=True) or {}
+    key = normalize_key(data.get("key", ""))
+    if not key:
+        return jsonify(ok=False, reason="invalid_key"), 400
+
+    valid, reason = verify_key_remote(key)
     if not valid:
-        session.clear()
-        return redirect("/")
-    return render_template_string(HOME_HTML, access_key=session.get("key", ""))
+        return jsonify(ok=False, reason=reason or "invalid_key"), 403
 
+    settings = get_settings_by_hash(key_hash(key))
+    return jsonify(
+        ok=True,
+        language=settings["language"],
+        updated=settings["updated"],
+    )
 
-@app.route("/api/public-server-status")
-def public_server_status_proxy():
-    try:
-        req = urllib.request.Request(KEY_MANAGER_URL + "/server/status", headers={"Cache-Control":"no-cache"})
-        with urllib.request.urlopen(req, timeout=6) as r:
-            return json.loads(r.read().decode())
-    except Exception:
-        return {"enabled": True, "update_active": False}
-
-@app.route("/api/server-status")
-def server_status_proxy():
-    if not session.get("access"):
-        return {"enabled": False}, 401
-    try:
-        req = urllib.request.Request(KEY_MANAGER_URL + "/server/status", headers={"Cache-Control":"no-cache"})
-        with urllib.request.urlopen(req, timeout=6) as r:
-            data = json.loads(r.read().decode())
-        return data
-    except Exception:
-        return {"enabled": True, "update_active": False}
 
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect("/")
 
+
+@app.route("/health")
+def health():
+    try:
+        con = db()
+        con.execute("SELECT 1").fetchone()
+        con.close()
+        return jsonify(ok=True, database=True), 200
+    except Exception as exc:
+        return jsonify(ok=False, database=False, error=str(exc)[:120]), 503
+
+
+@app.after_request
+def security_headers(resp):
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",10000)))
+    db().close()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")))
