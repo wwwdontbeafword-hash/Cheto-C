@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, redirect, session, render_template_string
-import os, sqlite3, hashlib, json, urllib.request, urllib.error
-from datetime import datetime
+import os, sqlite3, hashlib, json, urllib.request, urllib.error, secrets
+from datetime import datetime, timedelta
 
 try:
     import psycopg
@@ -14,18 +14,22 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=os.environ.get("COOKIE_SECURE", "1") == "1",
+    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
 )
 
-# Existing key-manager site. This settings site does NOT create keys; it only
-# checks that the key exists/is active, then stores preferences for that key.
 KEY_VERIFY_URL = os.environ.get(
     "KEY_VERIFY_URL",
     "https://key-manager-o3df.onrender.com/verify",
 ).strip()
+PUBLIC_BASE_URL = os.environ.get(
+    "PUBLIC_BASE_URL",
+    "https://cheto-c.onrender.com",
+).strip().rstrip("/")
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 SQLITE_PATH = os.environ.get("SQLITE_PATH", "cheto_settings.db")
 ALLOWED_LANGUAGES = {"en", "es", "ar"}
+LAUNCH_TOKEN_SECONDS = int(os.environ.get("LAUNCH_TOKEN_SECONDS", "90"))
 
 
 class DBConnection:
@@ -64,6 +68,18 @@ def db():
             updated TEXT NOT NULL
         )"""
     )
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS launch_tokens(
+            token_hash TEXT PRIMARY KEY,
+            key_hash TEXT NOT NULL,
+            key_mask TEXT NOT NULL,
+            key_value TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            expires TEXT NOT NULL,
+            used INTEGER NOT NULL DEFAULT 0,
+            created TEXT NOT NULL
+        )"""
+    )
     con.commit()
     return con
 
@@ -72,8 +88,16 @@ def normalize_key(value):
     return str(value or "").strip().upper()
 
 
+def clean_device_id(value):
+    return str(value or "").strip()
+
+
+def sha256(value):
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
 def key_hash(key):
-    return hashlib.sha256(normalize_key(key).encode("utf-8")).hexdigest()
+    return sha256(normalize_key(key))
 
 
 def mask_key(key):
@@ -83,16 +107,20 @@ def mask_key(key):
     return key[:3] + "••••••" + key[-3:]
 
 
-def verify_key_remote(key):
-    """Validate against the existing key-manager without binding a new device."""
-    payload = json.dumps({"key": normalize_key(key)}).encode("utf-8")
+def verify_key_remote(key, device_id):
+    key = normalize_key(key)
+    device_id = clean_device_id(device_id)
+    if not key or not device_id:
+        return False, "missing_credentials"
+
+    payload = json.dumps({"key": key, "device_id": device_id}).encode("utf-8")
     req = urllib.request.Request(
         KEY_VERIFY_URL,
         data=payload,
         headers={
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": "Cheto-Settings/1.0",
+            "User-Agent": "Cheto-Settings/2.0",
         },
         method="POST",
     )
@@ -146,23 +174,79 @@ def save_settings_by_hash(kh, language):
     return now
 
 
-LOGIN_HTML = r"""
+def create_launch_token(key, device_id):
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = sha256(raw_token)
+    now = datetime.utcnow()
+    expires = now + timedelta(seconds=max(30, LAUNCH_TOKEN_SECONDS))
+
+    con = db()
+    # Keep the table small.
+    con.execute("DELETE FROM launch_tokens WHERE expires<? OR used=1", (now.isoformat(),))
+    con.execute(
+        """INSERT INTO launch_tokens(
+            token_hash,key_hash,key_mask,key_value,device_id,expires,used,created
+        ) VALUES(?,?,?,?,?,?,0,?)""",
+        (
+            token_hash,
+            key_hash(key),
+            mask_key(key),
+            normalize_key(key),
+            clean_device_id(device_id),
+            expires.isoformat(),
+            now.isoformat(),
+        ),
+    )
+    con.commit()
+    con.close()
+    return raw_token
+
+
+def consume_launch_token(raw_token):
+    raw_token = str(raw_token or "").strip()
+    if not raw_token:
+        return None
+
+    now = datetime.utcnow()
+    con = db()
+    row = con.execute(
+        "SELECT * FROM launch_tokens WHERE token_hash=? AND used=0",
+        (sha256(raw_token),),
+    ).fetchone()
+    if not row:
+        con.close()
+        return None
+
+    try:
+        expires = datetime.fromisoformat(row["expires"])
+    except Exception:
+        expires = now - timedelta(seconds=1)
+
+    if now > expires:
+        con.execute("DELETE FROM launch_tokens WHERE token_hash=?", (sha256(raw_token),))
+        con.commit()
+        con.close()
+        return None
+
+    con.execute("UPDATE launch_tokens SET used=1 WHERE token_hash=?", (sha256(raw_token),))
+    con.commit()
+    data = dict(row)
+    con.close()
+    return data
+
+
+ACCESS_DENIED_HTML = r"""
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Cheto Settings</title>
-<style>
-*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#03050a;color:#f7f8fc;font-family:Arial,sans-serif;background-image:radial-gradient(circle at 20% 10%,#5f3dff22,transparent 30%),radial-gradient(circle at 85% 85%,#1a8bff17,transparent 30%)}
-.card{width:min(480px,92vw);padding:30px;border:1px solid #20283a;border-radius:24px;background:#080b12eF;box-shadow:0 26px 80px #000b,0 0 60px #684dff14;backdrop-filter:blur(18px)}
-.badge{display:inline-flex;gap:7px;align-items:center;padding:7px 10px;border:1px solid #27513f;border-radius:999px;color:#64e9a8;background:#071a13;font-size:10px;font-weight:900}.dot{width:6px;height:6px;border-radius:50%;background:#59eaa2;box-shadow:0 0 12px #59eaa2}
-h1{font-size:31px;margin:18px 0 8px}.sub{color:#7e899e;font-size:13px;line-height:1.6;margin:0 0 20px}.err{padding:11px 12px;margin-bottom:12px;border:1px solid #642033;border-radius:12px;background:#280b13;color:#ff8194;font-size:12px}
-input,button{width:100%;height:54px;border-radius:14px;font-size:14px}input{border:1px solid #293248;background:#04070d;color:#fff;padding:0 16px;outline:none}input:focus{border-color:#735cff;box-shadow:0 0 0 4px #735cff16}button{margin-top:12px;border:0;color:white;font-weight:900;cursor:pointer;background:linear-gradient(90deg,#5f46ff,#a83bf3,#3282ff);box-shadow:0 12px 30px #6a4cff30}.foot{margin-top:15px;color:#58657b;font-size:10px}
-</style></head><body><main class="card"><span class="badge"><i class="dot"></i>KEY SETTINGS ONLINE</span><h1>Settings Browser</h1><p class="sub">Enter the same activation key you used inside Lua. Your settings are stored only for that key.</p>{% if error %}<div class="err">{{error}}</div>{% endif %}<form method="post"><input name="key" placeholder="Activation Key" autocomplete="off" required autofocus><button>CONTINUE</button></form><div class="foot">Cheto-C • Per-key settings</div></main></body></html>
+<title>Access Denied</title><style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#03050a;color:#f7f8fc;font-family:Arial,sans-serif;background-image:radial-gradient(circle at 50% 20%,#7d244522,transparent 34%)}
+.card{width:min(460px,92vw);padding:30px;border:1px solid #4d1f2b;border-radius:24px;background:#09080ded;box-shadow:0 28px 90px #000c;text-align:center}.icon{width:60px;height:60px;margin:auto;border-radius:18px;display:grid;place-items:center;border:1px solid #6b2636;background:#260b12;color:#ff627b;font-size:28px;box-shadow:0 0 28px #ff36552b}h1{font-size:28px;margin:18px 0 8px}.sub{color:#8a8794;font-size:13px;line-height:1.6;margin:0}.hint{margin-top:18px;color:#5f6572;font-size:10px}
+</style></head><body><main class="card"><div class="icon">×</div><h1>Access Denied</h1><p class="sub">Open Settings Browser from inside the game menu to authorize this browser.</p><div class="hint">Cheto-C • Secure browser handoff</div></main></body></html>
 """
 
 
 HOME_HTML = r"""
 <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Cheto Settings</title>
-<style>
+<title>Cheto Settings</title><style>
 *{box-sizing:border-box}body{margin:0;min-height:100vh;background:#03050a;color:#f7f8fc;font-family:Arial,sans-serif;background-image:radial-gradient(circle at 12% 5%,#6546ff22,transparent 28%),radial-gradient(circle at 90% 90%,#168cff18,transparent 28%)}
 .wrap{width:min(760px,94vw);margin:45px auto}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}.eyebrow{color:#7d879b;font-size:10px;letter-spacing:2px}.title{font-size:28px;font-weight:900;margin-top:5px}.key{font:800 11px monospace;color:#b5bfd2;border:1px solid #273149;background:#070b13;border-radius:999px;padding:8px 11px}
 .card{border:1px solid #20283a;border-radius:24px;background:#080b12ed;box-shadow:0 28px 90px #0009;overflow:hidden}.head{padding:24px 25px;border-bottom:1px solid #182132}.head h2{margin:0 0 6px}.head p{margin:0;color:#78859b;font-size:12px}.body{padding:25px}
@@ -172,43 +256,72 @@ HOME_HTML = r"""
 """
 
 
-def login_error(reason):
-    reason = str(reason or "")
-    if reason in {"inactive", "expired", "disabled"}:
-        return "Key expired or stopped."
-    if reason == "server_offline":
-        return "Key server is currently off."
-    if reason == "rate_limited":
-        return "Too many attempts. Try again shortly."
-    if reason == "connection_error":
-        return "Could not reach the key server."
-    return "Invalid activation key."
+def denied():
+    return render_template_string(ACCESS_DENIED_HTML), 403
 
 
-@app.route("/", methods=["GET", "POST"])
-def login():
-    error = None
-    if request.method == "POST":
-        key = normalize_key(request.form.get("key", ""))
-        if not key:
-            error = "Enter your activation key."
-        else:
-            valid, reason = verify_key_remote(key)
-            if valid:
-                session.clear()
-                session["key_hash"] = key_hash(key)
-                session["key_mask"] = mask_key(key)
-                return redirect("/home")
-            error = login_error(reason)
-    return render_template_string(LOGIN_HTML, error=error)
+@app.route("/", methods=["GET"])
+def root():
+    if session.get("authorized") and session.get("key") and session.get("device_id"):
+        return redirect("/home")
+    return denied()
+
+
+@app.route("/api/launch", methods=["POST"])
+def api_launch():
+    data = request.get_json(silent=True) or {}
+    key = normalize_key(data.get("key", ""))
+    device_id = clean_device_id(data.get("device_id", ""))
+    if not key or not device_id:
+        return jsonify(ok=False, reason="missing_credentials"), 400
+
+    valid, reason = verify_key_remote(key, device_id)
+    if not valid:
+        return jsonify(ok=False, reason=reason or "invalid_key"), 403
+
+    token = create_launch_token(key, device_id)
+    return jsonify(ok=True, open_url=f"{PUBLIC_BASE_URL}/open?t={token}")
+
+
+@app.route("/open", methods=["GET"])
+def open_from_game():
+    row = consume_launch_token(request.args.get("t", ""))
+    if not row:
+        return denied()
+
+    # Re-check at consumption time so a stopped/expired key cannot use an old token.
+    valid, _ = verify_key_remote(row["key_value"], row["device_id"])
+    if not valid:
+        return denied()
+
+    session.clear()
+    session.permanent = True
+    session["authorized"] = True
+    session["key"] = row["key_value"]
+    session["key_hash"] = row["key_hash"]
+    session["key_mask"] = row["key_mask"]
+    session["device_id"] = row["device_id"]
+    return redirect("/home")
 
 
 @app.route("/home", methods=["GET", "POST"])
 def home():
-    kh = session.get("key_hash")
-    if not kh:
-        return redirect("/")
+    if not session.get("authorized"):
+        return denied()
 
+    key = normalize_key(session.get("key", ""))
+    device_id = clean_device_id(session.get("device_id", ""))
+    if not key or not device_id:
+        session.clear()
+        return denied()
+
+    # Keep the browser session tied to the same still-valid game key/device.
+    valid, _ = verify_key_remote(key, device_id)
+    if not valid:
+        session.clear()
+        return denied()
+
+    kh = key_hash(key)
     saved = False
     if request.method == "POST":
         language = str(request.form.get("language", "en")).lower()
@@ -221,7 +334,7 @@ def home():
     return render_template_string(
         HOME_HTML,
         language=settings["language"],
-        mask=session.get("key_mask", "KEY"),
+        mask=session.get("key_mask", mask_key(key)),
         saved=saved,
     )
 
@@ -230,25 +343,22 @@ def home():
 def api_settings():
     data = request.get_json(silent=True) or {}
     key = normalize_key(data.get("key", ""))
-    if not key:
-        return jsonify(ok=False, reason="invalid_key"), 400
+    device_id = clean_device_id(data.get("device_id", ""))
+    if not key or not device_id:
+        return jsonify(ok=False, reason="missing_credentials"), 400
 
-    valid, reason = verify_key_remote(key)
+    valid, reason = verify_key_remote(key, device_id)
     if not valid:
         return jsonify(ok=False, reason=reason or "invalid_key"), 403
 
     settings = get_settings_by_hash(key_hash(key))
-    return jsonify(
-        ok=True,
-        language=settings["language"],
-        updated=settings["updated"],
-    )
+    return jsonify(ok=True, language=settings["language"], updated=settings["updated"])
 
 
 @app.route("/logout")
 def logout():
     session.clear()
-    return redirect("/")
+    return denied()
 
 
 @app.route("/health")
